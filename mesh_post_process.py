@@ -7,7 +7,7 @@ from meshgpt_pytorch import (
     MeshTransformer,
     mesh_render
 )
-
+import os
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -24,8 +24,8 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--transformer_path', type=str, default="/media/ry/rayan/mesh_postprocess/checkpoints/mesh-encoder_16k_2_4_0.339.pt", help='Transformer 权重路径')
     parser.add_argument('--autoencoder_path', type=str, default="/media/ry/rayan/mesh_postprocess/checkpoints/mesh-transformer.16k_768_12_12_loss_2.335.pt", help='Autoencoder 权重路径')
-    parser.add_argument('--obj_input_path', type=str, default="./obj_input/human9.obj", help='Autoencoder 权重路径')
-    parser.add_argument('--obj_output_path', type=str, default="./obj_output", help='Autoencoder 权重路径')
+    parser.add_argument('--obj_input_path', type=str, default="./obj_input/human9.obj", help='input path')
+    parser.add_argument('--obj_output_path', type=str, default="./obj_output", help='output path')
     return parser.parse_args()
 
 def load_mesh_obj(file_path):
@@ -131,8 +131,18 @@ def main():
     #                                 faces = faces,
     #                                 temperature=0.0
     #                               )
+    # 从输入路径中提取基名并去掉扩展名
+    input_basename = os.path.basename(args.obj_input_path)  # 获取文件名带扩展
+    input_no_ext = os.path.splitext(input_basename)[0]      # 去掉扩展名
     
-    mesh_render.save_rendering('./render.obj', output)
+    # 确保输出目录存在
+    os.makedirs(args.obj_output_path, exist_ok=True)    
+    # 生成输出文件路径
+    output_file_path = os.path.join(args.obj_output_path, f"{input_no_ext}_render.obj")
+
+
+    # 调用 save_rendering 函数并使用从命令行获取的输出路径
+    mesh_render.save_rendering(output_file_path, all_random_samples)
     
     logger.info('Processing complete')
 
