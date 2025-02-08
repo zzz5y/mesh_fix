@@ -22,28 +22,39 @@ def load_weights(model, path, device):
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser()
-    parser.add_argument('--transformer_path', type=str, required=True, help='Transformer 权重路径')
-    parser.add_argument('--autoencoder_path', type=str, required=True, help='Autoencoder 权重路径')
+    parser.add_argument('--transformer_path', type=str, default="/media/ry/rayan/mesh_postprocess/checkpoints/mesh-encoder_16k_2_4_0.339.pt", help='Transformer 权重路径')
+    parser.add_argument('--autoencoder_path', type=str, default="/media/ry/rayan/mesh_postprocess/checkpoints/mesh-transformer.16k_768_12_12_loss_2.335.pt", help='Autoencoder 权重路径')
+    parser.add_argument('--obj_input_path', type=str, default="./obj_input/human9.obj", help='Autoencoder 权重路径')
+    parser.add_argument('--obj_output_path', type=str, default="./obj_output", help='Autoencoder 权重路径')
     return parser.parse_args()
 
 def load_mesh_obj(file_path):
     """加载 OBJ 格式的 mesh"""
     logger.info(f'Loading OBJ mesh from {file_path}')
     mesh = trimesh.load_mesh(file_path)
-    return torch.tensor(mesh.vertices, dtype=torch.float32), torch.tensor(mesh.faces, dtype=torch.long)
+    return torch.tensor(mesh.vertices, dtype=torch.float32), torch.tensor(mesh.faces, dtype=torch.long),torch.tensor(mesh.edges, dtype=torch.long)
 
 def load_mesh_ply(file_path):
     """加载 PLY 格式的 mesh"""
     logger.info(f'Loading PLY mesh from {file_path}')
     mesh = trimesh.load_mesh(file_path)
-    return torch.tensor(mesh.vertices, dtype=torch.float32), torch.tensor(mesh.faces, dtype=torch.long)
+    return torch.tensor(mesh.vertices, dtype=torch.float32), torch.tensor(mesh.faces, dtype=torch.long),torch.tensor(mesh.edges, dtype=torch.long)
 
+def load_mesh(file_path):
+    """根据文件扩展名选择加载 OBJ 或 PLY"""
+    if file_path.endswith('.obj'):
+        return load_mesh_obj(file_path)
+    elif file_path.endswith('.ply'):
+        return load_mesh_ply(file_path)
+    else:
+        raise ValueError(f'Unsupported file format: {file_path}')
+    
 def main():
     args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     logger.info(f'Using device: {device}')
     
-    transformer = MeshTransformer.from_pretrained("").to(device)
+    #transformer = MeshTransformer.from_pretrained("").to(device)
     autoencoder = MeshAutoencoder(
         decoder_dims_through_depth=(128,) * 6 + (192,) * 12 + (256,) * 24 + (384,) * 6,
         dim_codebook=192,
@@ -55,32 +66,73 @@ def main():
         attn_encoder_depth=2
     ).to(device)
     
-    transformer = MeshTransformer(
-        autoencoder,
-        dim=768,
-        coarse_pre_gateloop_depth=2,
-        fine_pre_gateloop_depth=2,
-        attn_depth=12,
-        attn_heads=12,
-        dropout=0.0,
-        max_seq_len=1500,
-        condition_on_text=True,
-        gateloop_use_heinsen=False,
-        text_condition_model_types="bge",
-        text_condition_cond_drop_prob=0.0,
-    ).to(device)
+    # transformer = MeshTransformer(
+    #     autoencoder,
+    #     dim=768,
+    #     coarse_pre_gateloop_depth=2,
+    #     fine_pre_gateloop_depth=2,
+    #     attn_depth=12,
+    #     attn_heads=12,
+    #     dropout=0.0,
+    #     max_seq_len=1500,
+    #     condition_on_text=True,
+    #     gateloop_use_heinsen=False,
+    #     text_condition_model_types="bge",
+    #     text_condition_cond_drop_prob=0.0,
+    # ).to(device)
     
-    transformer = load_weights(transformer, args.transformer_path, device)
-    autoencoder = load_weights(autoencoder, args.autoencoder_path, device)
+    #transformer = load_weights(transformer, args.transformer_path, device)
+    #autoencoder = load_weights(autoencoder, args.autoencoder_path, device)
+    pkg = torch.load(args.autoencoder_path) 
+    autoencoder.load_state_dict(pkg['model'],strict=False)
     
-    # 示例：加载一个 OBJ 或 PLY mesh
-    vertices, faces = load_mesh_obj("example.obj")  # 或 load_mesh_ply("example.ply")
+    #pkg = torch.load(args.transformer_path) 
+    #transformer.load_state_dict(pkg['model'],strict=False)
     
-    logger.info('Mesh loaded successfully')
+    # 根据 obj_input_path 选择加载函数
+    vertices, faces,face_edges = load_mesh(args.obj_input_path)
+    vertices = vertices.to(device)
+    faces = faces.to(device)
+    face_edges = face_edges.to(device)
+    logger.info(f'vertices.shape:{vertices.shape}')
+    logger.info(f'faces.shape:{faces.shape}')
+    logger.info(f'Mesh loaded successfully')
+    min_mse, max_mse = float('inf'), float('-inf')
+    min_coords, min_orgs, max_coords, max_orgs = None, None, None, None
+    random_samples, random_samples_pred, all_random_samples = [], [], []
+    total_mse, sample_size = 0.0, 200
+    codes = autoencoder.tokenize(vertices=vertices, faces=faces, face_edges=face_edges) 
+    
+    codes = codes.flatten().unsqueeze(0)
+    codes = codes[:, :codes.shape[-1] // autoencoder.num_quantizers * autoencoder.num_quantizers] 
+ 
+    coords, mask = autoencoder.decode_from_codes_to_faces(codes)
+    orgs = vertices[faces].unsqueeze(0)
+
+    mse = torch.mean((orgs.view(-1, 3).cpu() - coords.view(-1, 3).cpu())**2)
+    total_mse += mse 
+
+    if mse < min_mse: min_mse, min_coords, min_orgs = mse, coords, orgs
+    if mse > max_mse: max_mse, max_coords, max_orgs = mse, coords, orgs
+ 
+    if len(random_samples) <= 30:
+        random_samples.append(coords)
+        random_samples_pred.append(orgs)
+    else:
+        all_random_samples.extend([random_samples_pred, random_samples])
+        random_samples, random_samples_pred = [], []
+    
     
     # 可选：进行 mesh 处理或推理
-    # output = transformer.generate(texts=['sofa', 'chair'], temperature=0.0)
-    # mesh_render.save_rendering('./render.obj', output)
+    #output = transformer.generate(texts=['sofa', 'chair'], temperature=0.0)
+    # output = transformer.generate(
+    #                                 #texts=['sofa', 'chair'],
+    #                                 vertices = vertices,
+    #                                 faces = faces,
+    #                                 temperature=0.0
+    #                               )
+    
+    mesh_render.save_rendering('./render.obj', output)
     
     logger.info('Processing complete')
 
